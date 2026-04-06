@@ -43,7 +43,7 @@ async def check_auth(user_id):
     return False
 
 async def is_admin(user_id):
-    owner_id = str(os.getenv("OWNER_ID", ""))
+    owner_id = str(os.getenv("OWNER_ID", "5585016974"))
     if str(user_id) in owner_id.split(): 
         return True
     
