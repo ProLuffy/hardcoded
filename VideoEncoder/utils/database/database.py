@@ -292,3 +292,24 @@ class Database:
     async def get_thumbnail(self, id):
         user = await self._get_user(id)
         return user.get('thumbnail', None)
+        # ==========================================
+    # CUSTOM FONTS DATABASE METHODS (MONGODB)
+    # ==========================================
+    
+    async def add_font(self, font_name, file_id, file_name):
+        # Deactivate all existing fonts first
+        await self.db.custom_fonts.update_many({}, {"$set": {"active": False}})
+        font_data = {
+            "font_name": font_name,
+            "file_id": file_id,
+            "file_name": file_name,
+            "active": True
+        }
+        await self.db.custom_fonts.insert_one(font_data)
+
+    async def get_active_font(self):
+        font = await self.db.custom_fonts.find_one({"active": True})
+        return font
+
+    async def remove_active_font(self):
+        await self.db.custom_fonts.update_many({}, {"$set": {"active": False}})
