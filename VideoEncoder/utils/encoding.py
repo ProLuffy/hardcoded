@@ -14,10 +14,6 @@ from .. import LOGGER, download_dir, encode_dir
 from .database.access_db import db
 from .display_progress import TimeFormatter
 
-FONT_DIR = "VideoEncoder/utils/extras/fonts"
-if not os.path.isdir(FONT_DIR):
-    os.makedirs(FONT_DIR)
-
 
 def get_codec(filepath, channel='v:0'):
     try:
@@ -198,6 +194,7 @@ async def encode(filepath, message, msg, audio_map=None, custom_sub_path=None, s
         preset = '-preset slow'
 
     # Some Optional Things
+    x265 = await db.get_hevc(message.from_user.id)
     if x265:
         video_opts = f'-profile:v main  -map 0:v? -map_chapters 0 -map_metadata 0'
     else:
@@ -210,23 +207,81 @@ async def encode(filepath, message, msg, audio_map=None, custom_sub_path=None, s
     else:
         metadata = ''
 
-    # ==========================================
-    # 🔴 FIX: CUSTOM QUALITY & FONT SYSTEM
-    # ==========================================
+    # Copy Subtitles & Handle Custom Interactions
+    h = await db.get_hardsub(message.from_user.id)
+    s = await db.get_subtitles(message.from_user.id)
+    
+    extra_inputs = []
+    if sub_mode == 'none':
+        subtitles = '-sn'
+    elif custom_sub_path and sub_mode == 'soft':
+        extra_inputs = ['-i', custom_sub_path]
+        sub_codec = 'srt' if custom_sub_path.endswith('.srt') else 'ass'
+        if ex == 'MP4':
+            subtitles = '-map 1:s -c:s mov_text'
+        elif ex == 'AVI':
+            subtitles = ''
+        else:
+            subtitles = f'-map 1:s -c:s {sub_codec}'
+    elif not custom_sub_path and sub_mode == 'soft':
+        subtitles = '-map 0:s? -c:s copy'
+    elif sub_mode == 'hard':
+        subtitles = '-sn' # drop soft subs because they are hardcoded
+    else:
+        subs_i = get_codec(filepath, channel='s:0')
+        if subs_i == []:
+            subtitles = ''
+        else:
+            if s:
+                if h:
+                    subtitles = ''
+                else:
+                    if ex == 'MP4':
+                        subtitles = '-c:s mov_text -c:t copy -map 0:t? -map 0:s?'
+                    elif ex == 'AVI':
+                        subtitles = ''
+                    else:
+                        subtitles = '-c:s copy -c:t copy -map 0:t? -map 0:s?'
+            else:
+                subtitles = ''
+
+
+#    ffmpeg_filter = ':'.join([
+#        'drawtext=fontfile=/app/bot/utils/watermark/font.ttf',
+#        f"text='Cantarellabots'",
+#        f'fontcolor=white',
+#        'fontsize=main_h/20',
+#        f'x=40:y=40'
+#    ])
+
+    # Watermark and Resolution (Handles Custom Quality Interactively)
     r = custom_quality if custom_quality else await db.get_resolution(message.from_user.id)
     w = await db.get_watermark(message.from_user.id)
-    
-    vf_filters = []
-    if r == '2160': vf_filters.append('scale=3840:2160')
-    elif r == '1080': vf_filters.append('scale=1920:1080')
-    elif r == '720': vf_filters.append('scale=1280:720')
-    elif r == '576': vf_filters.append('scale=768:576')
-    elif r == '480': vf_filters.append('scale=852:480')
-
+    if r == 'OG':
+        watermark = ''
+    elif r == '2160':
+        watermark = '-vf scale=3840:2160'
+    elif r == '1080':
+        watermark = '-vf scale=1920:1080'
+    elif r == '720':
+        watermark = '-vf scale=1280:720'
+    elif r == '576':
+        watermark = '-vf scale=768:576'
+    elif r == '480':
+        watermark = '-vf scale=852:480'
+    else:
+        watermark = '-vf scale=852:480'
+        
     if w:
-        vf_filters.append('subtitles=VideoEncoder/utils/extras/watermark.ass')
+        if r == 'OG':
+            watermark += '-vf '
+        else:
+            watermark += ','
+        watermark += 'subtitles=VideoEncoder/utils/extras/watermark.ass'
 
-    abs_font_dir = os.path.abspath(FONT_DIR).replace('\\', '/')
+    # Font Setup for Hardcode
+    FONT_DIR = "VideoEncoder/utils/extras/fonts"
+    abs_font_dir = os.path.abspath(FONT_DIR) if os.path.exists(FONT_DIR) else ""
     active_font_name = None
     try:
         if hasattr(db, 'get_active_font'):
@@ -239,44 +294,29 @@ async def encode(filepath, message, msg, audio_map=None, custom_sub_path=None, s
     except Exception as e:
         LOGGER.error(f"Font fetch error: {e}")
 
-    # ==========================================
-    # 🔴 FIX: SUBTITLE LOGIC & FFmpeg FILTER
-    # ==========================================
-    extra_inputs = []
-    subtitles_args = []
+    # Hard Subs
+    is_hardsub = False
+    target_sub = None
     
-    if sub_mode == 'none':
-        subtitles_args = ['-sn']
-    elif sub_mode == 'soft':
-        if custom_sub_path:
-            extra_inputs = ['-i', custom_sub_path]
-            sub_codec = 'srt' if custom_sub_path.endswith('.srt') else 'ass'
-            subtitles_args = ['-map', '1:s', '-c:s', sub_codec]
-        else:
-            subtitles_args = ['-map', '0:s?', '-c:s', 'copy']
-    elif sub_mode == 'hard':
-        subtitles_args = ['-sn'] # Disable soft subs because it's being burned
+    if sub_mode == 'hard':
+        is_hardsub = True
         target_sub = custom_sub_path if custom_sub_path else subtitles_path
+    elif h and sub_mode is None:
+        is_hardsub = True
+        target_sub = subtitles_path
+
+    if is_hardsub and target_sub:
+        if r == 'OG' and not w:
+            watermark += '-vf '
+        else:
+            watermark += ','
+        
         target_sub = target_sub.replace('\\', '/')
-        font_opt = f":fontsdir='{abs_font_dir}':force_style='Fontname={active_font_name}'" if active_font_name else ""
-        vf_filters.append(f"subtitles='{target_sub}'{font_opt}")
-    else: # Fallback to original DB behavior
-        h = await db.get_hardsub(message.from_user.id)
-        s = await db.get_subtitles(message.from_user.id)
-        if h:
-            vf_filters.append(f"subtitles='{subtitles_path.replace('\\', '/')}'")
-        if s and not h:
-            if ex == 'MP4':
-                subtitles_args = ['-c:s', 'mov_text', '-c:t', 'copy', '-map', '0:t?', '-map', '0:s?']
-            elif ex == 'AVI':
-                subtitles_args = []
-            else:
-                subtitles_args = ['-c:s', 'copy', '-c:t', 'copy', '-map', '0:t?', '-map', '0:s?']
-
-    watermark_args = []
-    if vf_filters:
-        watermark_args = ['-vf', ','.join(vf_filters)]
-
+        if active_font_name and abs_font_dir:
+            abs_font_dir = abs_font_dir.replace('\\', '/')
+            watermark += f"subtitles='{target_sub}':fontsdir='{abs_font_dir}':force_style='Fontname={active_font_name}'"
+        else:
+            watermark += f"subtitles='{target_sub}'"
 
     # Sample rate
     sr = await db.get_samplerate(message.from_user.id)
@@ -306,7 +346,7 @@ async def encode(filepath, message, msg, audio_map=None, custom_sub_path=None, s
     else:
         bitrate = ''
 
-    # Audio
+    # # Audio
     a = await db.get_audio(message.from_user.id)
     a_i = get_codec(filepath, channel='a:0')
     if a_i == []:
@@ -327,10 +367,21 @@ async def encode(filepath, message, msg, audio_map=None, custom_sub_path=None, s
 
         if audio_map:
             # If audio_map is provided (e.g. [0:1, 0:2]), we use it to map audio streams.
+            # We need to make sure we map all audio streams in the desired order.
+            # The audio_opts above sets the codec for all audio streams.
+            # We need to construct the map part.
+            # Note: The previous code had `-map 0:a?` attached to audio_opts.
+            # If we have specific mapping, we shouldn't use generic `-map 0:a?`.
+
+            # The `audio_map` contains indices of audio streams in the original file.
+            # e.g. [1, 2] means map 0:1 then map 0:2.
+
             map_opts = ""
             for idx in audio_map:
                 map_opts += f" -map 0:{idx}"
 
+            # Explicitly set the default disposition for the first audio stream in the new order
+            # This ensures the first audio track in the list is the default one
             disposition_opts = " -disposition:a:0 default"
 
             audio_opts = f"{audio_opts} {map_opts} {disposition_opts}"
@@ -357,26 +408,23 @@ async def encode(filepath, message, msg, audio_map=None, custom_sub_path=None, s
 
     finish = '-threads 8'
 
-    # Finally - Safe FFmpeg Command Builder
+    # Finally - Safe execution avoiding string splitting errors
     command = ['ffmpeg', '-hide_banner', '-loglevel', 'error',
                '-progress', progress, '-hwaccel', 'auto', '-y', '-i', filepath]
                
     if extra_inputs:
         command.extend(extra_inputs)
-        
-    for opt in [codec, preset, frame, tunevideo, aspect, video_opts, Crf, metadata, audio_opts, channels, finish]:
-        if opt:
-            command.extend(opt.split())
-            
-    command.extend(subtitles_args)
-    if watermark_args:
-        command.extend(watermark_args)
+
+    # We safely append arguments without splitting the watermark string
+    args_list = codec.split() + preset.split() + frame.split() + tunevideo.split() + aspect.split() + video_opts.split() + Crf.split() + metadata.split() + subtitles.split() + audio_opts.split() + channels.split() + finish.split()
+    
+    command.extend(args_list)
+    if watermark:
+        command.extend(['-vf', watermark.replace('-vf ', '', 1).strip()])
 
     proc = await asyncio.create_subprocess_exec(*command, output_filepath, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    
     # Progress Bar
     await handle_progress(proc, msg, message, filepath)
-    
     # Wait for the subprocess to finish
     stdout, stderr = await proc.communicate()
     e_response = stderr.decode().strip()
@@ -538,8 +586,8 @@ async def handle_progress(proc, msg, message, filepath):
                     LOGGER.info(progress[-1])
                     break
             
-        # Error fix from original: `break` aur `execution_time` alag kar diya
-        execution_time = TimeFormatter((time.time() - COMPRESSION_START_TIME))
+        execution_time = TimeFormatter(
+            (time.time() - COMPRESSION_START_TIME))
         elapsed_time = int(time_in_us)/1000000
         total_time, bitrate = await media_info(filepath)
         difference = math.floor((total_time - elapsed_time) / float(speed))
